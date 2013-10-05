@@ -1,6 +1,7 @@
 #include <string.h>
 
 #include "yakc.hpp"
+#include "yakcmem.hpp"
 #include "cursor.hpp"
 
 static void
@@ -137,18 +138,24 @@ KyotoDB_array(KyotoDB *self, int type)
     std::string value;
     while (cursor->get(&key, &value, true)) {
         switch (type) {
-        case 0:
-            PyList_SetItem(result, i++, PyString_FromString(key.c_str()));
+        case 0: {
+            PyObject * pkey = (PyString_FromStringAndSize(key.data(), key.size()));
+            PyList_SetItem(result, i++, pkey);
             break;
-        case 1:
-            PyList_SetItem(result, i++, PyString_FromString(value.c_str()));
+        }
+        case 1: {
+            PyObject *pvalue = PyString_FromString(value.c_str());
+            PyList_SetItem(result, i++, pvalue);
             break;
-        case 2:
+        }
+        case 2: {
+            APR pkey(PyString_FromStringAndSize(key.data(), key.size()));
+            APR pvalue(PyString_FromString(value.c_str()));
+
             PyList_SetItem(result, i++,
-                           PyTuple_Pack(2,
-                                        PyString_FromString(key.c_str()),
-                                        PyString_FromString(value.c_str())));
+                           PyTuple_Pack(2, (PyObject *)pkey, (PyObject *)pvalue));
             break;
+        }
         }
     }
     delete cursor;
@@ -185,8 +192,8 @@ static PyObject *
 KyotoDB_iter(KyotoDB *self)
 {
     KyotoCursor *cursor = PyObject_New(KyotoCursor, &yakc_CursorType);
-    PyObject *tuple = PyTuple_Pack(1, self);
-    int re = Cursor_init(cursor, tuple, NULL);
+    APR tuple(PyTuple_Pack(1, self));
+    int re = Cursor_init(cursor, tuple.get(), NULL);
     if (re == 0)
         return (PyObject *)cursor;
     PyErr_SetString(PyExc_RuntimeError, "Cannot create cursor");
@@ -197,8 +204,9 @@ static PyObject *
 KyotoDB_itervalues(KyotoDB *self)
 {
     KyotoCursor *cursor = PyObject_New(KyotoCursor, &yakc_CursorType);
-    PyObject *tuple = PyTuple_Pack(2, self, PyInt_FromLong((long)KYOTO_VALUE));
-    int re = Cursor_init(cursor, tuple, NULL);
+    APR type(PyInt_FromLong((long)KYOTO_VALUE));
+    APR tuple(PyTuple_Pack(2, self, (PyObject *)type));
+    int re = Cursor_init(cursor, tuple.get(), NULL);
     if (re == 0)
         return (PyObject *)cursor;
     PyErr_SetString(PyExc_RuntimeError, "Cannot create cursor");
@@ -209,8 +217,9 @@ static PyObject *
 KyotoDB_iteritems(KyotoDB *self)
 {
     KyotoCursor *cursor = PyObject_New(KyotoCursor, &yakc_CursorType);
-    PyObject *tuple = PyTuple_Pack(2, self, PyInt_FromLong((long)KYOTO_ITEMS));
-    int re = Cursor_init(cursor, tuple, NULL);
+    APR type(PyInt_FromLong((long)KYOTO_ITEMS));
+    APR tuple(PyTuple_Pack(2, self, type.get()));
+    int re = Cursor_init(cursor, tuple.get(), NULL);
     if (re == 0)
         return (PyObject *)cursor;
     PyErr_SetString(PyExc_RuntimeError, "Cannot create cursor");
@@ -281,43 +290,34 @@ KyotoDB_pop(KyotoDB *self, PyObject *args, PyObject *kwds)
 static bool
 KyotoDB_update_with_mapping(KyotoDB *self, PyObject *mapping)
 {
-    PyObject *iterator = PyObject_GetIter(mapping);
-    PyObject *item;
+    APR iterator(PyObject_GetIter(mapping));
+    APR item(NULL);
 
     if (iterator == NULL) {
         PyErr_SetString(PyExc_RuntimeError, "object is not iterable");
         return false;
     }
 
-    while ((item = PyIter_Next(iterator)) != NULL) {
-        if (!PyString_Check(item)) {
+    while ((item = PyIter_Next(iterator.get())) != NULL) {
+        if (!PyString_Check(item.get())) {
             PyErr_SetString(PyExc_TypeError, "key should be string");
-            Py_DECREF(item);
-            Py_DECREF(iterator);
             return false;
         }
-        PyObject *value = PyObject_GetItem(mapping, item);
+        APR value(PyObject_GetItem(mapping, item.get()));
         if (value == NULL) {
-            Py_DECREF(item);
-            Py_DECREF(iterator);
             PyErr_SetString(PyExc_RuntimeError, "Value is not found");
             return false;
         }
-        if (!PyString_Check(value)) {
+        if (!PyString_Check(value.get())) {
             PyErr_SetString(PyExc_TypeError, "value should be string");
-            Py_DECREF(item);
-            Py_DECREF(iterator);
             return false;
         }
                     
-        const char *ckey = PyString_AsString(item);
-        const char *cvalue = PyString_AsString(value);
+        const char *ckey = PyString_AsString(item.get());
+        const char *cvalue = PyString_AsString(value.get());
         self->m_db->set(std::string(ckey), std::string(cvalue));
-        Py_DECREF(value);
-        Py_DECREF(item);
     }
 
-    Py_DECREF(iterator);
     return true;
 }
 
@@ -326,21 +326,20 @@ KyotoDB_update(KyotoDB *self, PyObject *args, PyObject *kwds)
 {
     Py_ssize_t size = PyTuple_Size(args);
     if (size > 1) {
-        PyObject *str = PyString_FromFormat("update expected at most 1 arguments, got %zd", size);
-        PyErr_SetObject(PyExc_TypeError, str);
-        Py_DECREF(str);
+        APR str(PyString_FromFormat("update expected at most 1 arguments, got %zd", size));
+        PyErr_SetObject(PyExc_TypeError, str.get());
         return NULL;
     }
 
     if (size == 1) {
-        PyObject *obj = PyTuple_GetItem(args, 0);
+        APR obj(PyTuple_GetItem(args, 0));
 
-        if (PyMapping_Check(obj)) {
-            if (!KyotoDB_update_with_mapping(self, obj))
+        if (PyMapping_Check(obj.get())) {
+            if (!KyotoDB_update_with_mapping(self, obj.get()))
                 return NULL;
         } else {
-            PyObject *iterator = PyObject_GetIter(obj);
-            PyObject *item;
+            APR iterator (PyObject_GetIter(obj.get()));
+            APR item;
 
             if (iterator == NULL) {
                 PyErr_SetString(PyExc_RuntimeError, "object is not iterable");
@@ -348,54 +347,35 @@ KyotoDB_update(KyotoDB *self, PyObject *args, PyObject *kwds)
             }
 
             Py_ssize_t i = 0;
-            while ((item = PyIter_Next(iterator)) != NULL) {
-                if (!PySequence_Check(item)) {
-                    PyObject *str = PyString_FromFormat("cannot convert dictionary update sequence element #%zd to a sequence", i);
-                    PyErr_SetObject(PyExc_TypeError, str);
-                    Py_DECREF(str);
-                    Py_DECREF(item);
-                    Py_DECREF(iterator);
+            while ((item = PyIter_Next(iterator.get())) != NULL) {
+                if (!PySequence_Check(item.get())) {
+                    APR str(PyString_FromFormat("cannot convert dictionary update sequence element #%zd to a sequence", i));
+                    PyErr_SetObject(PyExc_TypeError, str.get());
                     return NULL;
                 }
-                if (PySequence_Size(item) != 2) {
-                    PyObject *str = PyString_FromFormat("dictionary update sequence element #%zd has length %zd; 2 is required",
-                                                        i, PySequence_Size(item));
-                    PyErr_SetObject(PyExc_TypeError, str);
-                    Py_DECREF(str);
-                    Py_DECREF(item);
-                    Py_DECREF(iterator);
+                if (PySequence_Size(item.get()) != 2) {
+                    APR str(PyString_FromFormat("dictionary update sequence element #%zd has length %zd; 2 is required",
+                                                i, PySequence_Size(item.get())));
+                    PyErr_SetObject(PyExc_TypeError, str.get());
                     return NULL;
                 }
-                PyObject *key = PySequence_GetItem(item, 0);
-                if (!PyString_Check(key)) {
+                APR key(PySequence_GetItem(item.get(), 0));
+                if (!PyString_Check(key.get())) {
                     PyErr_SetString(PyExc_TypeError, "key should be string");
-                    Py_DECREF(key);
-                    Py_DECREF(item);
-                    Py_DECREF(iterator);
                     return NULL;
                 }
 
-                PyObject *value = PySequence_GetItem(item, 1);
-                if (!PyString_Check(value)) {
+                APR value(PySequence_GetItem(item.get(), 1));
+                if (!PyString_Check(value.get())) {
                     PyErr_SetString(PyExc_TypeError, "value should be string");
-                    Py_DECREF(key);
-                    Py_DECREF(value);
-                    Py_DECREF(item);
-                    Py_DECREF(iterator);
                     return NULL;
                 }
 
-                const char *ckey = PyString_AsString(key);
-                const char *cvalue = PyString_AsString(value);
+                const char *ckey = PyString_AsString(key.get());
+                const char *cvalue = PyString_AsString(value.get());
                 self->m_db->set(std::string(ckey), std::string(cvalue));
-                Py_DECREF(key);
-                Py_DECREF(value);
-            
-                Py_DECREF(item);
                 i++;
             }
-            Py_DECREF(iterator);
-
         }
     }
 
@@ -448,15 +428,15 @@ static PyMappingMethods KyotoDB_mapping = {
 
 static PySequenceMethods KyotoDB_sequence = {
     (lenfunc)KyotoDB__len__,
-    NULL, // concatenate
-    NULL, // repeat
-    NULL, // get item
-    NULL, // slice
-    NULL, // set item
-    NULL, // slice
+    NULL,                       // concatenate
+    NULL,                       // repeat
+    NULL,                       // get item
+    NULL,                       // slice
+    NULL,                       // set item
+    NULL,                       // slice
     (objobjproc)KyotoDB_contains,
-    NULL, // in-place concatenate
-    NULL  // in-place repeat
+    NULL,                       // in-place concatenate
+    NULL                        // in-place repeat
 };
 
 // static PyMemberDef KyotoDB_members[] = {
@@ -465,44 +445,44 @@ static PySequenceMethods KyotoDB_sequence = {
 
 static PyTypeObject KyotoDBType = {
     PyObject_HEAD_INIT(NULL)
-    0,                         /*ob_size*/
-    "yakc.TreeDB",             /*tp_name*/
-    sizeof(KyotoDB),         /*tp_basicsize*/
-    0,                         /*tp_itemsize*/
+    0,                          /*ob_size*/
+    "yakc.TreeDB",              /*tp_name*/
+    sizeof(KyotoDB),            /*tp_basicsize*/
+    0,                          /*tp_itemsize*/
     (destructor)KyotoDB_dealloc, /*tp_dealloc*/
-    0,                         /*tp_print*/
-    0,                         /*tp_getattr*/
-    0,                         /*tp_setattr*/
-    0,                         /*tp_compare*/
-    0,                         /*tp_repr*/
-    0,                         /*tp_as_number*/
-    &KyotoDB_sequence,       /*tp_as_sequence*/
-    &KyotoDB_mapping,        /*tp_as_mapping*/
-    0,                         /*tp_hash */
-    0,                         /*tp_call*/
-    0,                         /*tp_str*/
-    0,                         /*tp_getattro*/
-    0,                         /*tp_setattro*/
-    0,                         /*tp_as_buffer*/
+    0,                          /*tp_print*/
+    0,                          /*tp_getattr*/
+    0,                          /*tp_setattr*/
+    0,                          /*tp_compare*/
+    0,                          /*tp_repr*/
+    0,                          /*tp_as_number*/
+    &KyotoDB_sequence,          /*tp_as_sequence*/
+    &KyotoDB_mapping,           /*tp_as_mapping*/
+    0,                          /*tp_hash */
+    0,                          /*tp_call*/
+    0,                          /*tp_str*/
+    0,                          /*tp_getattro*/
+    0,                          /*tp_setattro*/
+    0,                          /*tp_as_buffer*/
     Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE, /*tp_flags*/
-    "Kyoto Cabinet TreeDB",    /* tp_doc */
-    0,                         /* tp_traverse */
-    0,                         /* tp_clear */
-    0,                         /* tp_richcompare */
-    0,                         /* tp_weaklistoffset */
-    (getiterfunc)KyotoDB_iter,            /* tp_iter */
-    0,                         /* tp_iternext */
-    KyotoDB_methods,         /* tp_methods */
-    0,                         /* tp_members */
-    0,                         /* tp_getset */
-    0,                         /* tp_base */
-    0,                         /* tp_dict */
-    0,                         /* tp_descr_get */
-    0,                         /* tp_descr_set */
-    0,                         /* tp_dictoffset */
-    (initproc)KyotoDB_init,      /* tp_init */
-    0,                         /* tp_alloc */
-    KyotoDB_new,                 /* tp_new */
+    "Kyoto Cabinet TreeDB",     /* tp_doc */
+    0,                          /* tp_traverse */
+    0,                          /* tp_clear */
+    0,                          /* tp_richcompare */
+    0,                          /* tp_weaklistoffset */
+    (getiterfunc)KyotoDB_iter,  /* tp_iter */
+    0,                          /* tp_iternext */
+    KyotoDB_methods,            /* tp_methods */
+    0,                          /* tp_members */
+    0,                          /* tp_getset */
+    0,                          /* tp_base */
+    0,                          /* tp_dict */
+    0,                          /* tp_descr_get */
+    0,                          /* tp_descr_set */
+    0,                          /* tp_dictoffset */
+    (initproc)KyotoDB_init,     /* tp_init */
+    0,                          /* tp_alloc */
+    KyotoDB_new,                /* tp_new */
 };
 
 static PyMethodDef module_methods[] = {

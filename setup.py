@@ -11,4 +11,6 @@ setup (name = 'yakyotocabinet',
        description = 'Yet Another Kyoto Cabinet Binding',
        author = 'OKAMURA Yasunobu',
        author_email = 'okamura@informationsea.info',
-       ext_modules = [module1])
+       ext_modules = [module1],
+       url = 'https://github.com/informationsea/Yet-Another-Kyoto-Cabinet-Python-Binding',
+       data_files = ['yakc.hpp', 'cursor.hpp', 'yakcmem.hpp'])
