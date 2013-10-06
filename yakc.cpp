@@ -16,11 +16,7 @@ KyotoDB_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
     KyotoDB *self;
     self = (KyotoDB *)type->tp_alloc(type, 0);
     if (self != NULL) {
-        self->m_db = new kyotocabinet::TreeDB();
-        if (self->m_db == NULL) {
-            Py_DECREF(self);
-            return NULL;
-        }
+        self->m_db = NULL;
     }
     return (PyObject *)self;
 }
@@ -29,20 +25,49 @@ static int
 KyotoDB_init(KyotoDB *self, PyObject *args, PyObject *kwds)
 {
     static char* kwlist[5] = {
-        strdup("path"), strdup("mode"), NULL
+        strdup("path"), strdup("mode"), strdup("type"), strdup("pickle"), NULL
     };
     
-    const char* path;
+    const char *path = NULL;
     int mode = kyotocabinet::BasicDB::OWRITER|kyotocabinet::BasicDB::OCREATE;
+    const char *type = NULL;
+    int pickle = true;
 
-    if (! PyArg_ParseTupleAndKeywords(args, kwds, "s|i", kwlist,
-                                      &path, &mode))
+    if (! PyArg_ParseTupleAndKeywords(args, kwds, "|sisi", kwlist,
+                                      &path, &mode, &type, &pickle))
         return -1;
+
+    // printf("path: %s\nmode: %d\ntype: %s\npickle: %d\n",
+    //        path, mode, type, pickle);
+
+    if (type == NULL)
+        self->m_db = new kyotocabinet::PolyDB();
+    else if (strcmp(type, "TreeDB") == 0)
+        self->m_db = new kyotocabinet::TreeDB();
+    else if (strcmp(type, "HashDB") == 0)
+        self->m_db = new kyotocabinet::HashDB();
+    else if (strcmp(type, "DirDB") == 0)
+        self->m_db = new kyotocabinet::DirDB();
+    else if (strcmp(type, "ForestDB") == 0)
+        self->m_db = new kyotocabinet::ForestDB();
+    else if (strcmp(type, "PolyDB") == 0)
+        self->m_db = new kyotocabinet::PolyDB();
+    else {
+        APR str(PyString_FromFormat("Database %s is not supported", type));
+        PyErr_SetObject(PyExc_RuntimeError, str);
+        return -1;
+    }
+
+    if (self->m_db == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "Cannot create database object");
+        return -1;
+    }
 
     bool suceed = self->m_db->open(path, mode);
-    if (!suceed)
+    if (!suceed) {
+        PyErr_SetString(PyExc_RuntimeError, "Cannot open database");
         return -1;
-    //printf("path: %s\nmode: %d\n", path, mode);
+    }
 
     return 0;
 }
