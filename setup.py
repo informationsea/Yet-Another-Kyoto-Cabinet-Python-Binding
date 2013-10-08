@@ -4,7 +4,7 @@ module1 = Extension('yakc',
                     include_dirs = ['/opt/local/include'],
                     library_dirs = ['/opt/local/lib'],
                     libraries = ['kyotocabinet'],
-                    sources = ['yakc.cpp', 'cursor.cpp'])
+                    sources = ['yakc.cpp'])
 
 setup (name = 'yakyotocabinet',
        version = '0.1',
@@ -12,5 +12,4 @@ setup (name = 'yakyotocabinet',
        author = 'OKAMURA Yasunobu',
        author_email = 'okamura@informationsea.info',
        ext_modules = [module1],
-       url = 'https://github.com/informationsea/Yet-Another-Kyoto-Cabinet-Python-Binding',
-       data_files = ['yakc.hpp', 'cursor.hpp', 'yakcmem.hpp'])
+       url = 'https://github.com/informationsea/Yet-Another-Kyoto-Cabinet-Python-Binding')

@@ -1,8 +1,122 @@
 #include <string.h>
 
-#include "yakc.hpp"
-#include "yakcmem.hpp"
-#include "cursor.hpp"
+#include <Python.h>
+#include <kcpolydb.h>
+
+enum KyotoCursorType {
+    KYOTO_KEY, KYOTO_VALUE, KYOTO_ITEMS
+};
+
+typedef struct {
+    PyObject_HEAD
+    kyotocabinet::BasicDB *m_db;
+    bool use_pickle;
+} KyotoDB;
+
+typedef struct {
+    PyObject_HEAD
+    KyotoDB *m_db;
+    kyotocabinet::BasicDB::Cursor *m_cursor;
+    enum KyotoCursorType m_type;
+} KyotoCursor;
+
+extern PyTypeObject yakc_CursorType;
+int Cursor_init(KyotoCursor *self, PyObject *args, PyObject *kwds);
+
+
+class AutoPythonRef
+{
+private:
+    PyObject* m_p;
+    bool m_increment;
+public:
+    explicit AutoPythonRef(PyObject* p = NULL, bool increment = false) :
+        m_p(p), m_increment(increment) {
+        
+        if (increment) {
+            Py_INCREF(p);
+        }
+    }
+    ~AutoPythonRef() {
+        if (m_p)
+            Py_DECREF(m_p);
+    }
+
+    AutoPythonRef& operator=(PyObject *newp) {
+        if (m_increment)
+            Py_INCREF(newp);
+        if (m_p)
+            Py_DECREF(m_p);
+        m_p = newp;
+        return *this;
+    }
+
+    AutoPythonRef& operator++() {
+        Py_INCREF(m_p);
+        return *this;
+    }
+
+    AutoPythonRef& operator--() {
+        Py_DECREF(m_p);
+        return *this;
+    }
+
+    bool operator==(PyObject *obj) {return m_p == obj;}
+    bool operator!=(PyObject *obj) {return m_p != obj;}
+    operator PyObject*() {return m_p;}
+    
+    PyObject* operator->() const {return m_p;}
+    PyObject* get() const {return m_p;}
+};
+
+typedef AutoPythonRef APR;
+
+
+static PyObject *pickle_dumps;
+static PyObject *pickle_loads;
+
+/* Internal use only */
+static PyObject *
+KyotoDB_load(std::string data, bool use_pickle)
+{
+    if (use_pickle) {
+        APR pydata(PyString_FromStringAndSize(data.data(), data.size()));
+        if (PyErr_Occurred() != NULL)
+            return NULL;
+        return PyObject_CallFunctionObjArgs(pickle_loads, (PyObject *)pydata, NULL);
+    } else {
+        return PyString_FromStringAndSize(data.data(), data.size());
+    }
+}
+
+static std::string
+KyotoDB_dump(PyObject *obj, bool use_pickle, bool *ok)
+{
+    *ok = false;
+    if (use_pickle) {
+        APR pydata(PyObject_CallFunctionObjArgs(pickle_dumps, obj, NULL));
+        if (PyErr_Occurred() != NULL)
+            return "";
+        
+        char *buffer;
+        Py_ssize_t size;
+        if (PyString_AsStringAndSize(pydata, &buffer, &size) < 0) {
+            return "";
+        }
+        *ok = true;
+        return std::string(buffer, size);
+    } else {
+        char *buffer;
+        Py_ssize_t size;
+        if (PyString_AsStringAndSize(obj, &buffer, &size) < 0) {
+            return "";
+        }
+        *ok = true;
+        return std::string(buffer, size);
+    }
+}
+
+/* ---------------- KyotoDB -------------------*/
 
 static void
 KyotoDB_dealloc(KyotoDB *self)
@@ -69,6 +183,8 @@ KyotoDB_init(KyotoDB *self, PyObject *args, PyObject *kwds)
         return -1;
     }
 
+    self->use_pickle = pickle;
+
     return 0;
 }
 
@@ -89,20 +205,16 @@ KyotoDB__len__(KyotoDB *self)
 static int
 KyotoDB__set__(KyotoDB *self, PyObject* key, PyObject *v)
 {
-    if (!PyString_Check(key)) {
-        PyErr_SetString(PyExc_TypeError, "key should be string");
+    bool ok;
+    std::string ckey = KyotoDB_dump(key, self->use_pickle, &ok);
+    if (!ok)
         return 0;
-    }
-    if (!PyString_Check(v)) {
-        PyErr_SetString(PyExc_TypeError, "value should be string");
+
+    std::string cvalue = KyotoDB_dump(v, self->use_pickle, &ok);
+    if (!ok)
         return 0;
-    }
 
-
-    char *ckey = PyString_AsString(key);
-    char *cvalue = PyString_AsString(v);
-
-    if (self->m_db->set(std::string(ckey), std::string(cvalue)))
+    if (self->m_db->set(ckey, cvalue))
         return 0;
 
     PyErr_SetString(PyExc_RuntimeError, "KyotoCabinet Error");
@@ -112,15 +224,15 @@ KyotoDB__set__(KyotoDB *self, PyObject* key, PyObject *v)
 static PyObject *
 KyotoDB__get__(KyotoDB *self, PyObject *key)
 {
-    if (!PyString_Check(key)) {
-        PyErr_SetString(PyExc_TypeError, "key should be string");
-        return NULL;
-    }
-    char *ckey = PyString_AsString(key);
+    bool ok;
+    std::string ckey = KyotoDB_dump(key, self->use_pickle, &ok);
+    if (!ok) return 0;
+
     std::string value;
     bool success = self->m_db->get(std::string(ckey), &value);
-    if (success)
-        return PyString_FromStringAndSize(value.c_str(), value.size());
+    if (success) {
+        return KyotoDB_load(value, self->use_pickle);
+    }
     PyErr_SetObject(PyExc_KeyError, key);
     return NULL;
 }
@@ -129,7 +241,8 @@ static PyObject *
 KyotoDB_path(KyotoDB *self)
 {
     PyObject *result;
-    result = PyString_FromString(self->m_db->path().c_str());
+    std::string path = self->m_db->path();
+    result = PyString_FromStringAndSize(path.data(), path.size());
     return result;
 }
 
@@ -141,13 +254,18 @@ KyotoDB_del(KyotoDB *self, PyObject *args, PyObject *kwds)
         strdup("key"), NULL
     };
 
-    const char* key;
+    PyObject* pykey;
 
-    if (! PyArg_ParseTupleAndKeywords(args, kwds, "s", kwlist,
-                                      &key))
+    if (! PyArg_ParseTupleAndKeywords(args, kwds, "o", kwlist,
+                                      &pykey)) {
         return NULL;
+    }
 
-    result = PyBool_FromLong(self->m_db->remove(key, strlen(key)));
+    bool ok;
+    std::string ckey = KyotoDB_dump(pykey, self->use_pickle, &ok);
+    if (!ok) return 0;
+
+    result = PyBool_FromLong(self->m_db->remove(ckey));
     return result;
 }
 
@@ -164,18 +282,27 @@ KyotoDB_array(KyotoDB *self, int type)
     while (cursor->get(&key, &value, true)) {
         switch (type) {
         case 0: {
-            PyObject * pkey = (PyString_FromStringAndSize(key.data(), key.size()));
+            PyObject *pkey = KyotoDB_load(key, self->use_pickle);
+            if (pkey == NULL)
+                goto onerror;
             PyList_SetItem(result, i++, pkey);
             break;
         }
         case 1: {
-            PyObject *pvalue = PyString_FromString(value.c_str());
+            PyObject *pvalue = KyotoDB_load(value, self->use_pickle);
+            if (pvalue == NULL)
+                goto onerror;
             PyList_SetItem(result, i++, pvalue);
             break;
         }
         case 2: {
-            APR pkey(PyString_FromStringAndSize(key.data(), key.size()));
-            APR pvalue(PyString_FromString(value.c_str()));
+            APR pkey(KyotoDB_load(key, self->use_pickle));
+            if (pkey == NULL)
+                goto onerror;
+
+            APR pvalue(KyotoDB_load(value, self->use_pickle));
+            if (pvalue == NULL)
+                goto onerror;
 
             PyList_SetItem(result, i++,
                            PyTuple_Pack(2, (PyObject *)pkey, (PyObject *)pvalue));
@@ -184,8 +311,14 @@ KyotoDB_array(KyotoDB *self, int type)
         }
     }
     delete cursor;
-
     return result;
+  onerror:
+    for (Py_ssize_t j = 0; j < i; j++) {
+        PyObject *obj = PyList_GetItem(result, j);
+        Py_DECREF(obj);
+    }
+    delete cursor;
+    return NULL;
 }
 
 static PyObject *
@@ -254,12 +387,11 @@ KyotoDB_iteritems(KyotoDB *self)
 static int
 KyotoDB_contains(KyotoDB *self, PyObject *obj)
 {
-    if (!PyString_Check(obj)) {
-        PyErr_SetString(PyExc_TypeError, "key should be string");
-        return 0;
-    }
-
-    return self->m_db->check(std::string(PyString_AsString(obj))) < 0 ? 0 : 1;
+    bool ok;
+    std::string ckey = KyotoDB_dump(obj, self->use_pickle, &ok);
+    if (ok)
+        return self->m_db->check(ckey) < 0 ? 0 : 1;
+    return 0;
 }
 
 static PyObject *
@@ -291,24 +423,28 @@ KyotoDB_pop(KyotoDB *self, PyObject *args, PyObject *kwds)
         strdup("key"), strdup("default"), NULL
     };
 
-    const char *key = NULL;
-    const char *defaultvalue = NULL;
+    PyObject *key = NULL;
+    PyObject *defaultvalue = NULL;
     
-    if (! PyArg_ParseTupleAndKeywords(args, kwds, "s|s", kwlist,
-                                      &key, &defaultvalue)) {
-        PyErr_SetString(PyExc_TypeError, "Key and default value should be string");
+    if (! PyArg_ParseTupleAndKeywords(args, kwds, "O|O", kwlist,
+                                      &key, &defaultvalue))
         return 0;
-    }
+
+    bool ok;
+    std::string ckey = KyotoDB_dump(key, self->use_pickle, &ok);
+    if (!ok)
+        return 0;
 
     std::string value;
-    if (self->m_db->seize(std::string(key), &value)) {
-        return PyString_FromString(value.c_str());
+    if (self->m_db->seize(ckey, &value))
+        return KyotoDB_load(value, self->use_pickle);
+
+    if (defaultvalue != NULL) {
+        Py_INCREF(defaultvalue);
+        return defaultvalue;
     }
 
-    if (defaultvalue != NULL)
-        return PyString_FromString(defaultvalue);
-
-    PyErr_SetString(PyExc_KeyError, key);
+    PyErr_SetObject(PyExc_KeyError, key);
     return 0;
 }
 
@@ -324,23 +460,21 @@ KyotoDB_update_with_mapping(KyotoDB *self, PyObject *mapping)
     }
 
     while ((item = PyIter_Next(iterator.get())) != NULL) {
-        if (!PyString_Check(item.get())) {
-            PyErr_SetString(PyExc_TypeError, "key should be string");
-            return false;
-        }
         APR value(PyObject_GetItem(mapping, item.get()));
         if (value == NULL) {
             PyErr_SetString(PyExc_RuntimeError, "Value is not found");
             return false;
         }
-        if (!PyString_Check(value.get())) {
-            PyErr_SetString(PyExc_TypeError, "value should be string");
+        bool ok;
+        std::string ckey = KyotoDB_dump(item, self->use_pickle, &ok);
+        if (!ok)
             return false;
-        }
-                    
-        const char *ckey = PyString_AsString(item.get());
-        const char *cvalue = PyString_AsString(value.get());
-        self->m_db->set(std::string(ckey), std::string(cvalue));
+
+        std::string cvalue = KyotoDB_dump(value, self->use_pickle, &ok);
+        if (!ok)
+            return false;
+        
+        self->m_db->set(ckey, cvalue);
     }
 
     return true;
@@ -385,20 +519,18 @@ KyotoDB_update(KyotoDB *self, PyObject *args, PyObject *kwds)
                     return NULL;
                 }
                 APR key(PySequence_GetItem(item.get(), 0));
-                if (!PyString_Check(key.get())) {
-                    PyErr_SetString(PyExc_TypeError, "key should be string");
-                    return NULL;
-                }
-
                 APR value(PySequence_GetItem(item.get(), 1));
-                if (!PyString_Check(value.get())) {
-                    PyErr_SetString(PyExc_TypeError, "value should be string");
-                    return NULL;
-                }
 
-                const char *ckey = PyString_AsString(key.get());
-                const char *cvalue = PyString_AsString(value.get());
-                self->m_db->set(std::string(ckey), std::string(cvalue));
+                bool ok;
+                std::string ckey = KyotoDB_dump(key, self->use_pickle, &ok);
+                if (!ok)
+                    return NULL;
+
+                std::string cvalue = KyotoDB_dump(value, self->use_pickle, &ok);
+                if (!ok)
+                    return NULL;
+
+                self->m_db->set(ckey, cvalue);
                 i++;
             }
         }
@@ -471,7 +603,7 @@ static PySequenceMethods KyotoDB_sequence = {
 static PyTypeObject KyotoDBType = {
     PyObject_HEAD_INIT(NULL)
     0,                          /*ob_size*/
-    "yakc.TreeDB",              /*tp_name*/
+    "yakc.KyotoDB",              /*tp_name*/
     sizeof(KyotoDB),            /*tp_basicsize*/
     0,                          /*tp_itemsize*/
     (destructor)KyotoDB_dealloc, /*tp_dealloc*/
@@ -490,7 +622,7 @@ static PyTypeObject KyotoDBType = {
     0,                          /*tp_setattro*/
     0,                          /*tp_as_buffer*/
     Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE, /*tp_flags*/
-    "Kyoto Cabinet TreeDB",     /* tp_doc */
+    "Kyoto Cabinet",     /* tp_doc */
     0,                          /* tp_traverse */
     0,                          /* tp_clear */
     0,                          /* tp_richcompare */
@@ -508,6 +640,136 @@ static PyTypeObject KyotoDBType = {
     (initproc)KyotoDB_init,     /* tp_init */
     0,                          /* tp_alloc */
     KyotoDB_new,                /* tp_new */
+};
+
+/* ---------------- Cursor -------------------*/
+
+static void
+Cursor_dealloc(KyotoCursor* self)
+{
+    Py_DECREF(self->m_db);
+    if (self->m_cursor)
+        delete self->m_cursor;
+}
+
+static PyObject *
+Cursor_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    KyotoCursor *self;
+    self = (KyotoCursor *)type->tp_alloc(type, 0);
+    if (self != NULL) {
+        self->m_cursor = NULL;
+        self->m_type = KYOTO_KEY;
+    }
+
+    return (PyObject *) self;
+}
+
+int Cursor_init(KyotoCursor *self, PyObject *args, PyObject *kwds)
+{
+    static char *kwlist[] = {strdup("db"), strdup("type"), NULL};
+    PyObject *db = NULL;
+    int type = KYOTO_KEY;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|i", kwlist, &db, &type)) {
+        PyErr_SetString(PyExc_RuntimeError, "Cannot create cursor");
+        return -1;
+    }
+
+    if (!db) {
+        PyErr_SetString(PyExc_RuntimeError, "Cannot create cursor");
+        return -1;
+    }
+
+    if (strcmp(db->ob_type->tp_name, "yakc.KyotoDB") != 0) {
+        PyErr_SetString(PyExc_TypeError, "First argument should be KyotoDB");
+        return -1;
+    }
+
+    KyotoDB *kyotodb = (KyotoDB *)db;
+    self->m_db = kyotodb;
+    Py_INCREF((PyObject *)self->m_db);
+
+    self->m_cursor = kyotodb->m_db->cursor();
+    self->m_cursor->jump();
+    self->m_type = (enum KyotoCursorType)type;
+
+    return 0;
+}
+
+static PyObject *
+Cursor_iter(KyotoCursor *self)
+{
+    Py_INCREF(self);
+    return (PyObject *)self;
+}
+
+static PyObject *
+Cursor_next(KyotoCursor *self)
+{
+    std::string key;
+    std::string value;
+    bool succeed = self->m_cursor->get(&key, &value, true);
+    if (succeed) {
+        switch (self->m_type) {
+        case KYOTO_VALUE: {
+            return KyotoDB_load(value, self->m_db->use_pickle);
+        }
+        case KYOTO_ITEMS:{
+            APR pkey(KyotoDB_load(key, self->m_db->use_pickle));
+            APR pvalue(KyotoDB_load(value, self->m_db->use_pickle));
+            return PyTuple_Pack(2, (PyObject *)pkey, (PyObject *)pvalue);
+        }
+        case KYOTO_KEY:
+        default:
+            return KyotoDB_load(key, self->m_db->use_pickle);
+        }
+    }
+
+    PyErr_SetString(PyExc_StopIteration, "");
+    return NULL;
+}
+
+
+PyTypeObject yakc_CursorType = {
+    PyObject_HEAD_INIT(NULL)
+    0,                          /*ob_size*/
+    "yakc.Cursor",              /*tp_name*/
+    sizeof(KyotoCursor),        /*tp_basicsize*/
+    0,                          /*tp_itemsize*/
+    (destructor)Cursor_dealloc, /*tp_dealloc*/
+    0,                          /*tp_print*/
+    0,                          /*tp_getattr*/
+    0,                          /*tp_setattr*/
+    0,                          /*tp_compare*/
+    0,                          /*tp_repr*/
+    0,                          /*tp_as_number*/
+    0,                          /*tp_as_sequence*/
+    0,                          /*tp_as_mapping*/
+    0,                          /*tp_hash */
+    0,                          /*tp_call*/
+    0,                          /*tp_str*/
+    0,                          /*tp_getattro*/
+    0,                          /*tp_setattro*/
+    0,                          /*tp_as_buffer*/
+    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE, /*tp_flags*/
+    "Kyoto DB Cursor",          /* tp_doc */
+    0,                          /* tp_traverse */
+    0,                          /* tp_clear */
+    0,                          /* tp_richcompare */
+    0,                          /* tp_weaklistoffset */
+    (getiterfunc)Cursor_iter,   /* tp_iter */
+    (iternextfunc)Cursor_next,  /* tp_iternext */
+    0,                          /* tp_methods */
+    0,                          /* tp_members */
+    0,                          /* tp_getset */
+    0,                          /* tp_base */
+    0,                          /* tp_dict */
+    0,                          /* tp_descr_get */
+    0,                          /* tp_descr_set */
+    0,                          /* tp_dictoffset */
+    (initproc)Cursor_init,      /* tp_init */
+    0,                          /* tp_alloc */
+    Cursor_new,                 /* tp_new */
 };
 
 static PyMethodDef module_methods[] = {
@@ -532,6 +794,32 @@ inityakc(void)
 
     Py_INCREF(&KyotoDBType);
     PyModule_AddObject(m, "KyotoDB", (PyObject *)&KyotoDBType);
-    inityakc_cursor(m);
+
+    if (PyType_Ready(&yakc_CursorType) < 0)
+        return;
+
+    Py_INCREF(&yakc_CursorType);
+    PyModule_AddObject(m, "Cursor", (PyObject *)&yakc_CursorType);
+
+    APR cpickle_name(PyString_FromString("cPickle"));
+    APR cpickle(PyImport_Import(cpickle_name));
+
+    if (cpickle == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "Cannot import cpickle");
+        return;
+    }
+
+    pickle_dumps = PyObject_GetAttrString(cpickle, "dumps");
+    pickle_loads = PyObject_GetAttrString(cpickle, "loads");
+
+    if (pickle_dumps == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "Cannot find cpickle.dumps");
+        return;
+    }
+
+    if (pickle_loads == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "Cannot find cpickle.loads");
+        return;
+    }
 }
 
