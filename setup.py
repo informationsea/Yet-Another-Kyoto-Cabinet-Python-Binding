@@ -10,7 +10,7 @@ module1 = Extension('yakc',
                     sources = ['yakc.cpp'] + [os.path.join('kyotocabinet-1.2.76', x) for x in kyotocabinet_cc])
 
 setup (name = 'yakc',
-       version = '0.1.2',
+       version = '0.1.4',
        description = 'Yet Another Kyoto Cabinet Binding',
        author = 'OKAMURA Yasunobu',
        author_email = 'okamura@informationsea.info',
