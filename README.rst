@@ -11,6 +11,9 @@ License
 
   Yet Another Kyoto Cabinet Python Binding
   Copyright (C) 2013  Yasunobu OKAMURA
+
+  Kyoto Cabinet
+  Copyright (C) 2009-2011 FAL Labs
   
   This program is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
