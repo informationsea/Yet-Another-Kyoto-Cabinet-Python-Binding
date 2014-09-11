@@ -238,6 +238,38 @@ KyotoDB__get__(KyotoDB *self, PyObject *key)
 }
 
 static PyObject *
+KyotoDB_get(KyotoDB *self, PyObject *args, PyObject *kwds)
+{
+    static char* kwlist[5] = {
+        strdup("key"), strdup("default"), NULL
+    };
+
+    PyObject *key = NULL;
+    PyObject *defaultvalue = NULL;
+    
+    if (! PyArg_ParseTupleAndKeywords(args, kwds, "O|O", kwlist,
+                                      &key, &defaultvalue))
+        return 0;
+
+    bool ok;
+    std::string ckey = KyotoDB_dump(key, self->use_pickle, &ok);
+    if (!ok)
+        return 0;
+
+    std::string value;
+    if (self->m_db->get(ckey, &value))
+        return KyotoDB_load(value, self->use_pickle);
+
+    if (defaultvalue != NULL) {
+        Py_INCREF(defaultvalue);
+        return defaultvalue;
+    }
+
+    PyErr_SetObject(PyExc_KeyError, key);
+    return 0;
+}
+
+static PyObject *
 KyotoDB_path(KyotoDB *self)
 {
     PyObject *result;
@@ -555,21 +587,23 @@ static PyMethodDef KyotoDB_methods[] = {
     {"keys", (PyCFunction)KyotoDB_keys, METH_NOARGS,
      "List of keys"},
     {"values", (PyCFunction)KyotoDB_values, METH_NOARGS,
-     "List of keys"},
+     "List of values"},
     {"items", (PyCFunction)KyotoDB_items, METH_NOARGS,
-     "List of keys"},
+     "List of items"},
     {"iterkeys", (PyCFunction)KyotoDB_iter, METH_NOARGS,
      "Iterator of keys"},
     {"itervalues", (PyCFunction)KyotoDB_itervalues, METH_NOARGS,
-     "Iterator of keys"},
+     "Iterator of values"},
     {"iteritems", (PyCFunction)KyotoDB_iteritems, METH_NOARGS,
-     "Iterator of keys"},
+     "Iterator of items"},
     {"close", (PyCFunction)KyotoDB_close, METH_NOARGS,
      "close database"},
     {"clear", (PyCFunction)KyotoDB_clear, METH_NOARGS,
      "remove all items"},
     {"has_key", (PyCFunction)KyotoDB_has_key, METH_O,
-     "remove all items"},
+     "check key availability"},
+    {"get", (PyCFunction)KyotoDB_get, METH_KEYWORDS,
+     "get item for key"},
     {"pop", (PyCFunction)KyotoDB_pop, METH_KEYWORDS,
      "pop item"},
     {"update", (PyCFunction)KyotoDB_update, METH_KEYWORDS,
