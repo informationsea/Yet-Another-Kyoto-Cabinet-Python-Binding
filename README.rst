@@ -10,7 +10,7 @@ License
 ::
 
   Yet Another Kyoto Cabinet Python Binding
-  Copyright (C) 2013  Yasunobu OKAMURA
+  Copyright (C) 2013-2014  Yasunobu OKAMURA
 
   Kyoto Cabinet
   Copyright (C) 2009-2011 FAL Labs
